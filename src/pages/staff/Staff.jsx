@@ -1,0 +1,698 @@
+// ─── Staff Page ───────────────────────────────────────────────────────────────
+import { useState, useEffect, useCallback } from 'react';
+import {
+  Plus, Search, Edit2, Trash2, Users, Banknote, Receipt,
+  Settings as SettingsIcon, Save, AlertTriangle, Printer,
+} from 'lucide-react';
+import { getStaff, createStaff, updateStaff, deleteStaff } from '../../db/staffService.js';
+import { getPayrollEntries, recordPayroll, getExpenses, recordExpense, deleteExpense } from '../../db/payrollService.js';
+import { getConfig, updateConfig } from '../../db/configService.js';
+import { printPayrollReceipt } from '../../utils/printUtils.js';
+import { useAuth } from '../../contexts/AuthContext.jsx';
+import { STAFF_POSITIONS, PAYMENT_METHODS, EXPENSE_CATEGORIES, TERMS } from '../../utils/constants.js';
+import { formatCurrency, formatDate, getCurrentDateISO, generateAcademicYears } from '../../utils/grading.js';
+import Button from '../../components/common/Button.jsx';
+import Modal, { ConfirmModal } from '../../components/common/Modal.jsx';
+import { Input, Select, Textarea, FormRow } from '../../components/common/Input.jsx';
+import {
+  StatusBadge, EmptyState, PageHeader, Card, Badge, LoadingScreen, StatCard,
+} from '../../components/common/Badge.jsx';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared helper — mirrors the one in Fees.jsx
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildYearOptions(currentYear) {
+  if (!currentYear) return [];
+  if (currentYear.includes('/')) {
+    const startYear = parseInt(currentYear.split('/')[0], 10);
+    if (isNaN(startYear)) return [currentYear];
+    return [0, 1, 2].map((offset) => {
+      const y = startYear - offset;
+      return `${y}/${y + 1}`;
+    });
+  }
+  const y = parseInt(currentYear, 10);
+  if (isNaN(y)) return [currentYear];
+  return [0, 1, 2].map((offset) => String(y - offset));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared TermYearBar — reused by both Payroll and Expenses
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TermYearBar = ({ selectedTerm, setSelectedTerm, selectedYear, setSelectedYear, yearOptions, config }) => {
+  const isHistorical = config
+    && (selectedTerm !== config.currentTerm || selectedYear !== config.academicYear);
+
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <div className="flex items-center gap-2 p-1 bg-slate-100 rounded-xl">
+        {TERMS.map((t) => (
+          <button
+            key={t}
+            onClick={() => setSelectedTerm(t)}
+            className={`px-3.5 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              selectedTerm === t
+                ? 'bg-white text-navy-800 shadow-sm'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      <Select
+        value={selectedYear}
+        onChange={(e) => setSelectedYear(e.target.value)}
+        className="w-40"
+      >
+        {yearOptions.map((y) => (
+          <option key={y} value={y}>
+            {y}{y === config?.academicYear ? ' (current)' : ''}
+          </option>
+        ))}
+      </Select>
+
+      {isHistorical && (
+        <span className="flex items-center gap-1.5 text-xs text-blue-600 bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-full">
+          <AlertTriangle size={11} />
+          Historical view
+          <button
+            onClick={() => {
+              setSelectedTerm(config.currentTerm);
+              setSelectedYear(config.academicYear);
+            }}
+            className="ml-1 underline underline-offset-2 hover:text-blue-800"
+          >
+            Back to current
+          </button>
+        </span>
+      )}
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STAFF
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const EMPTY_STAFF = {
+  staffNumber: '', fullName: '', email: '', phone: '',
+  position: 'Teacher', department: '', joinDate: '',
+};
+
+const StaffModal = ({ open, onClose, onSave, existing }) => {
+  const isEdit = !!existing;
+  const [form, setForm]     = useState(EMPTY_STAFF);
+  const [error, setError]   = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setForm(existing ? { ...EMPTY_STAFF, ...existing } : EMPTY_STAFF);
+      setError('');
+    }
+  }, [open, existing]);
+
+  const set = (f) => (e) => setForm((p) => ({ ...p, [f]: e.target.value }));
+
+  const handleSave = async () => {
+    if (!form.fullName.trim()) { setError('Full name is required.'); return; }
+    setLoading(true);
+    try { await onSave(form); onClose(); }
+    catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} size="lg"
+      title={isEdit ? 'Edit Staff' : 'Add Staff Member'}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={handleSave} loading={loading}>{isEdit ? 'Save' : 'Add Staff'}</Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <FormRow>
+          <Input label="Full Name" required value={form.fullName} onChange={set('fullName')} placeholder="Full name" />
+          <Input label="Staff No." value={form.staffNumber} onChange={set('staffNumber')} placeholder="Auto-generated" />
+        </FormRow>
+        <FormRow>
+          <Input label="Email" type="email" value={form.email} onChange={set('email')} placeholder="staff@school.com" />
+          <Input label="Phone" type="tel" value={form.phone} onChange={set('phone')} placeholder="+256..." />
+        </FormRow>
+        <FormRow>
+          <Select label="Position" value={form.position} onChange={set('position')}>
+            {STAFF_POSITIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+          </Select>
+          <Input label="Department" value={form.department} onChange={set('department')} placeholder="e.g. Sciences" />
+        </FormRow>
+        <Input label="Join Date" type="date" value={form.joinDate} onChange={set('joinDate')} />
+        {error && (
+          <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{error}</div>
+        )}
+      </div>
+    </Modal>
+  );
+};
+
+export const Staff = () => {
+  const [staff, setStaff]           = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [search, setSearch]         = useState('');
+  const [modalOpen, setModalOpen]   = useState(false);
+  const [editing, setEditing]       = useState(null);
+  const [deleting, setDeleting]     = useState(null);
+  const [actionLoading, setActionLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setStaff(await getStaff({ search: search || undefined })); }
+    finally { setLoading(false); }
+  }, [search]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSave = async (form) => {
+    if (editing) await updateStaff(editing.id, form);
+    else await createStaff(form);
+    await load();
+  };
+
+  const handleDelete = async () => {
+    setActionLoading(true);
+    try { await deleteStaff(deleting.id); await load(); }
+    finally { setActionLoading(false); setDeleting(null); }
+  };
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <PageHeader
+        title="Staff"
+        subtitle={`${staff.length} staff members`}
+        actions={
+          <Button icon={Plus} onClick={() => { setEditing(null); setModalOpen(true); }}>
+            Add Staff
+          </Button>
+        }
+      />
+      <Card>
+        <Input placeholder="Search staff…" icon={Search} value={search}
+          onChange={(e) => setSearch(e.target.value)} className="max-w-xs mb-5" />
+        {loading ? <LoadingScreen /> : staff.length === 0 ? (
+          <EmptyState icon={Users} title="No staff found"
+            action={<Button icon={Plus} onClick={() => setModalOpen(true)}>Add Staff</Button>} />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  {['Staff No.', 'Name', 'Position', 'Department', 'Salary', 'Join Date', ''].map((h) => (
+                    <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {staff.map((s) => (
+                  <tr key={s.id} className="border-b border-slate-50 hover:bg-slate-50/60 group">
+                    <td className="py-3 px-3 text-xs font-mono text-slate-500">{s.staffNumber}</td>
+                    <td className="py-3 px-3">
+                      <p className="text-sm font-medium text-slate-800">{s.fullName}</p>
+                      <p className="text-xs text-slate-400">{s.email}</p>
+                    </td>
+                    <td className="py-3 px-3"><Badge variant="navy">{s.position}</Badge></td>
+                    <td className="py-3 px-3 text-sm text-slate-600">{s.department || '—'}</td>
+                    <td className="py-3 px-3 text-sm font-medium text-slate-700">{s.salary ? formatCurrency(s.salary) : '—'}</td>
+                    <td className="py-3 px-3 text-sm text-slate-500">{formatDate(s.joinDate)}</td>
+                    <td className="py-3 px-3">
+                      <div className="flex gap-1 opacity-0 group-hover:opacity-100">
+                        <Button size="xs" variant="ghost" icon={Edit2}
+                          onClick={() => { setEditing(s); setModalOpen(true); }} />
+                        <Button size="xs" variant="ghost" icon={Trash2}
+                          className="text-red-500 hover:bg-red-50" onClick={() => setDeleting(s)} />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <StaffModal open={modalOpen} onClose={() => setModalOpen(false)} onSave={handleSave} existing={editing} />
+      <ConfirmModal open={!!deleting} onClose={() => setDeleting(null)} onConfirm={handleDelete}
+        loading={actionLoading} title="Delete Staff"
+        message={`Delete ${deleting?.fullName}? This cannot be undone.`} />
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAYROLL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const Payroll = () => {
+  const { user } = useAuth();
+
+  const [entries, setEntries]   = useState([]);
+  const [staff, setStaff]       = useState([]);
+  const [config, setConfig]     = useState(null);
+  const [loading, setLoading]   = useState(true);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [saving, setSaving]     = useState(false);
+
+  // ── Term / year selection ──
+  const [selectedTerm, setSelectedTerm] = useState('');
+  const [selectedYear, setSelectedYear] = useState('');
+  const [yearOptions, setYearOptions]   = useState([]);
+
+  const [form, setForm] = useState({
+    staffId: '', basicSalary: '', allowances: '0', deductions: '0',
+    month: '', paymentMethod: 'Cash', paymentDate: getCurrentDateISO(), notes: '',
+  });
+
+  useEffect(() => {
+    getConfig().then((cfg) => {
+      setConfig(cfg);
+      setSelectedTerm(cfg?.currentTerm || TERMS[0]);
+      setSelectedYear(cfg?.academicYear || '');
+      setYearOptions(buildYearOptions(cfg?.academicYear));
+    });
+  }, []);
+
+  const loadEntries = useCallback(async () => {
+    if (!selectedTerm || !selectedYear) return;
+    setLoading(true);
+    try {
+      const [e, s] = await Promise.all([
+        getPayrollEntries({ academicYear: selectedYear, term: selectedTerm }),
+        getStaff(),
+      ]);
+      setEntries(e);
+      setStaff(s);
+    } finally { setLoading(false); }
+  }, [selectedTerm, selectedYear]);
+
+  useEffect(() => { loadEntries(); }, [loadEntries]);
+
+  const set = (f) => (e) => setForm((p) => ({ ...p, [f]: e.target.value }));
+
+  const resetForm = () => setForm({
+    staffId: '', basicSalary: '', allowances: '0', deductions: '0',
+    month: '', paymentMethod: 'Cash', paymentDate: getCurrentDateISO(), notes: '',
+  });
+
+  // ── Print receipt helper ──
+  const handlePrintReceipt = (entry) => {
+    printPayrollReceipt(entry, {
+      name:    config?.schoolName    || '',
+      address: config?.schoolAddress || '',
+      logoUrl: config?.logoUrl       || '',
+    });
+  };
+
+  const handleSave = async () => {
+    if (!form.staffId)     { setFormError('Select a staff member.'); return; }
+    if (!form.basicSalary) { setFormError('Enter basic salary.');    return; }
+    setSaving(true);
+    try {
+      const s      = staff.find((x) => x.id === form.staffId);
+      const result = await recordPayroll({
+        ...form,
+        staffName:    s?.fullName,
+        academicYear: selectedYear,
+        term:         selectedTerm,
+      }, user.id);
+      await loadEntries();
+      setModalOpen(false);
+      // Auto-print receipt immediately after saving
+      handlePrintReceipt(result);
+    } catch (e) { setFormError(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const totalPaid = entries.reduce((s, e) => s + e.netSalary, 0);
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <PageHeader
+        title="Payroll"
+        subtitle={`${selectedTerm} · ${selectedYear}`}
+        actions={
+          <Button icon={Plus} onClick={() => { resetForm(); setFormError(''); setModalOpen(true); }}>
+            Record Salary
+          </Button>
+        }
+      />
+
+      <TermYearBar
+        selectedTerm={selectedTerm} setSelectedTerm={setSelectedTerm}
+        selectedYear={selectedYear} setSelectedYear={setSelectedYear}
+        yearOptions={yearOptions} config={config}
+      />
+
+      <div className="grid grid-cols-2 gap-4">
+        <StatCard title="Total Paid This Period" value={formatCurrency(totalPaid)} icon={Banknote} color="emerald"
+          subtitle={`${selectedTerm} · ${selectedYear}`} />
+        <StatCard title="Payments Recorded" value={entries.length} icon={Banknote} color="navy"
+          subtitle={`${selectedTerm} · ${selectedYear}`} />
+      </div>
+
+      <Card>
+        {loading ? <LoadingScreen /> : entries.length === 0 ? (
+          <EmptyState icon={Banknote} title="No payroll records"
+            message={`No salary payments recorded for ${selectedTerm}, ${selectedYear}.`}
+            action={<Button icon={Plus} onClick={() => setModalOpen(true)}>Record Salary</Button>} />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  {['Staff', 'Month', 'Basic Salary', 'Allowances', 'Deductions', 'Net Salary', 'Date', ''].map((h) => (
+                    <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((e) => (
+                  <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50/60 group">
+                    <td className="py-3 px-3 text-sm font-medium text-slate-800">{e.staffName}</td>
+                    <td className="py-3 px-3 text-sm text-slate-600">{e.month}</td>
+                    <td className="py-3 px-3 text-sm text-slate-700">{formatCurrency(e.basicSalary)}</td>
+                    <td className="py-3 px-3 text-sm text-emerald-700">{formatCurrency(e.allowances)}</td>
+                    <td className="py-3 px-3 text-sm text-red-600">{formatCurrency(e.deductions)}</td>
+                    <td className="py-3 px-3 text-sm font-bold text-slate-900">{formatCurrency(e.netSalary)}</td>
+                    <td className="py-3 px-3 text-sm text-slate-400">{formatDate(e.paymentDate)}</td>
+                    {/* ── Receipt button — visible on row hover ── */}
+                    <td className="py-3 px-3">
+                      <Button
+                        size="xs"
+                        variant="secondary"
+                        icon={Printer}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={() => handlePrintReceipt(e)}
+                      >
+                        Receipt
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Record Salary Payment" size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setModalOpen(false)}>Cancel</Button>
+            <Button onClick={handleSave} loading={saving} icon={Printer}>Save & Print Receipt</Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <span className="px-2.5 py-1 rounded-full bg-slate-100 font-medium">{selectedTerm}</span>
+            <span className="px-2.5 py-1 rounded-full bg-slate-100 font-medium">{selectedYear}</span>
+          </div>
+
+          <Select label="Staff Member" required value={form.staffId} onChange={set('staffId')} placeholder="Select staff">
+            {staff.map((s) => <option key={s.id} value={s.id}>{s.fullName} — {s.position}</option>)}
+          </Select>
+          <FormRow>
+            <Input label="Month" placeholder="e.g. January 2025" value={form.month} onChange={set('month')} />
+            <Select label="Payment Method" value={form.paymentMethod} onChange={set('paymentMethod')}>
+              {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </Select>
+          </FormRow>
+          <FormRow cols={3}>
+            <Input label="Basic Salary" type="number" required value={form.basicSalary} onChange={set('basicSalary')} />
+            <Input label="Allowances" type="number" value={form.allowances} onChange={set('allowances')} />
+            <Input label="Deductions" type="number" value={form.deductions} onChange={set('deductions')} />
+          </FormRow>
+          <Input label="Payment Date" type="date" value={form.paymentDate} onChange={set('paymentDate')} />
+          <Input label="Notes (optional)" value={form.notes} onChange={set('notes')} placeholder="Any remarks…" />
+          {formError && (
+            <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{formError}</div>
+          )}
+        </div>
+      </Modal>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPENSES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const Expenses = () => {
+  const { user } = useAuth();
+
+  const [expenses, setExpenses]   = useState([]);
+  const [config, setConfig]       = useState(null);
+  const [loading, setLoading]     = useState(true);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [deleting, setDeleting]   = useState(null);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [saving, setSaving]       = useState(false);
+
+  const [selectedTerm, setSelectedTerm] = useState('');
+  const [selectedYear, setSelectedYear] = useState('');
+  const [yearOptions, setYearOptions]   = useState([]);
+
+  const [form, setForm] = useState({
+    category: 'Utilities', description: '', amount: '',
+    date: getCurrentDateISO(), notes: '',
+  });
+
+  useEffect(() => {
+    getConfig().then((cfg) => {
+      setConfig(cfg);
+      setSelectedTerm(cfg?.currentTerm || TERMS[0]);
+      setSelectedYear(cfg?.academicYear || '');
+      setYearOptions(buildYearOptions(cfg?.academicYear));
+    });
+  }, []);
+
+  const loadExpenses = useCallback(async () => {
+    if (!selectedTerm || !selectedYear) return;
+    setLoading(true);
+    try {
+      setExpenses(await getExpenses({ academicYear: selectedYear, term: selectedTerm }));
+    } finally { setLoading(false); }
+  }, [selectedTerm, selectedYear]);
+
+  useEffect(() => { loadExpenses(); }, [loadExpenses]);
+
+  const set = (f) => (e) => setForm((p) => ({ ...p, [f]: e.target.value }));
+
+  const resetForm = () => setForm({
+    category: 'Utilities', description: '', amount: '',
+    date: getCurrentDateISO(), notes: '',
+  });
+
+  const handleSave = async () => {
+    if (!form.description.trim())                 { setFormError('Description is required.'); return; }
+    if (!form.amount || Number(form.amount) <= 0) { setFormError('Enter a valid amount.'); return; }
+    setSaving(true);
+    try {
+      await recordExpense({ ...form, academicYear: selectedYear, term: selectedTerm }, user.id);
+      await loadExpenses();
+      setModalOpen(false);
+    } catch (e) { setFormError(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleDelete = async () => {
+    setActionLoading(true);
+    try { await deleteExpense(deleting.id); await loadExpenses(); }
+    finally { setActionLoading(false); setDeleting(null); }
+  };
+
+  const total = expenses.reduce((s, e) => s + e.amount, 0);
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <PageHeader
+        title="Expenses"
+        subtitle={`${selectedTerm} · ${selectedYear}`}
+        actions={
+          <Button icon={Plus} onClick={() => { resetForm(); setFormError(''); setModalOpen(true); }}>
+            Add Expense
+          </Button>
+        }
+      />
+
+      <TermYearBar
+        selectedTerm={selectedTerm} setSelectedTerm={setSelectedTerm}
+        selectedYear={selectedYear} setSelectedYear={setSelectedYear}
+        yearOptions={yearOptions} config={config}
+      />
+
+      <div className="grid grid-cols-2 gap-4">
+        <StatCard title="Total Expenses" value={formatCurrency(total)} icon={Receipt} color="amber"
+          subtitle={`${selectedTerm} · ${selectedYear}`} />
+        <StatCard title="Records" value={expenses.length} icon={Receipt} color="navy"
+          subtitle={`${selectedTerm} · ${selectedYear}`} />
+      </div>
+
+      <Card>
+        {loading ? <LoadingScreen /> : expenses.length === 0 ? (
+          <EmptyState icon={Receipt} title="No expenses recorded"
+            message={`No expenses recorded for ${selectedTerm}, ${selectedYear}.`}
+            action={<Button icon={Plus} onClick={() => setModalOpen(true)}>Add Expense</Button>} />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  {['Category', 'Description', 'Amount', 'Date', ''].map((h) => (
+                    <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {expenses.map((e) => (
+                  <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50/60 group">
+                    <td className="py-3 px-3"><Badge variant="warning">{e.category}</Badge></td>
+                    <td className="py-3 px-3 text-sm text-slate-800">{e.description}</td>
+                    <td className="py-3 px-3 text-sm font-semibold text-amber-700">{formatCurrency(e.amount)}</td>
+                    <td className="py-3 px-3 text-sm text-slate-500">{formatDate(e.date)}</td>
+                    <td className="py-3 px-3">
+                      <Button size="xs" variant="ghost" icon={Trash2}
+                        className="opacity-0 group-hover:opacity-100 text-red-500 hover:bg-red-50"
+                        onClick={() => setDeleting(e)} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Record Expense" size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setModalOpen(false)}>Cancel</Button>
+            <Button onClick={handleSave} loading={saving}>Save</Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <span className="px-2.5 py-1 rounded-full bg-slate-100 font-medium">{selectedTerm}</span>
+            <span className="px-2.5 py-1 rounded-full bg-slate-100 font-medium">{selectedYear}</span>
+          </div>
+
+          <Select label="Category" value={form.category} onChange={set('category')}>
+            {EXPENSE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </Select>
+          <Input label="Description" required placeholder="What was this expense for?"
+            value={form.description} onChange={set('description')} />
+          <FormRow>
+            <Input label="Amount (UGX)" type="number" required value={form.amount} onChange={set('amount')} />
+            <Input label="Date" type="date" value={form.date} onChange={set('date')} />
+          </FormRow>
+          <Textarea label="Notes" rows={2} value={form.notes} onChange={set('notes')} />
+          {formError && (
+            <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{formError}</div>
+          )}
+        </div>
+      </Modal>
+
+      <ConfirmModal open={!!deleting} onClose={() => setDeleting(null)} onConfirm={handleDelete}
+        loading={actionLoading} title="Delete Expense"
+        message={`Delete "${deleting?.description}"?`} />
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const Settings = () => {
+  const [config, setConfig]   = useState(null);
+  const [form, setForm]       = useState({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving]   = useState(false);
+  const [saved, setSaved]     = useState(false);
+  const [error, setError]     = useState('');
+  const years = generateAcademicYears();
+
+  useEffect(() => {
+    getConfig().then((cfg) => {
+      setConfig(cfg);
+      setForm({
+        schoolName:    cfg?.schoolName    || '',
+        schoolMotto:   cfg?.schoolMotto   || '',
+        schoolAddress: cfg?.schoolAddress || '',
+        schoolPhone:   cfg?.schoolPhone   || '',
+        schoolEmail:   cfg?.schoolEmail   || '',
+        academicYear:  cfg?.academicYear  || years[0],
+        currentTerm:   cfg?.currentTerm   || 'Term 1',
+      });
+    }).finally(() => setLoading(false));
+  }, []);
+
+  const set = (f) => (e) => setForm((p) => ({ ...p, [f]: e.target.value }));
+
+  const handleSave = async () => {
+    if (!form.schoolName.trim()) { setError('School name is required.'); return; }
+    setSaving(true);
+    try {
+      await updateConfig(form);
+      setSaved(true);
+      setError('');
+      setTimeout(() => setSaved(false), 3000);
+    } catch (e) { setError(e.message); }
+    finally { setSaving(false); }
+  };
+
+  if (loading) return <LoadingScreen />;
+
+  return (
+    <div className="space-y-5 animate-fade-in max-w-2xl">
+      <PageHeader title="Settings" subtitle="School profile and academic year configuration" />
+      <Card>
+        <h3 className="font-display font-semibold text-slate-800 mb-5">School Profile</h3>
+        <div className="space-y-4">
+          <Input label="School Name" required value={form.schoolName} onChange={set('schoolName')} />
+          <Input label="School Motto" value={form.schoolMotto} onChange={set('schoolMotto')} />
+          <Input label="Address" value={form.schoolAddress} onChange={set('schoolAddress')} />
+          <FormRow>
+            <Input label="Phone" type="tel" value={form.schoolPhone} onChange={set('schoolPhone')} />
+            <Input label="Email" type="email" value={form.schoolEmail} onChange={set('schoolEmail')} />
+          </FormRow>
+          <div className="border-t border-slate-100 pt-4">
+            <h4 className="text-sm font-semibold text-slate-700 mb-3">Academic Period</h4>
+            <FormRow>
+              <Select label="Academic Year" value={form.academicYear} onChange={set('academicYear')}>
+                {years.map((y) => <option key={y} value={y}>{y}</option>)}
+              </Select>
+              <Select label="Current Term" value={form.currentTerm} onChange={set('currentTerm')}>
+                {TERMS.map((t) => <option key={t} value={t}>{t}</option>)}
+              </Select>
+            </FormRow>
+          </div>
+          {error && (
+            <div className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{error}</div>
+          )}
+          <div className="flex items-center gap-3 pt-2">
+            <Button icon={Save} onClick={handleSave} loading={saving}>Save Settings</Button>
+            {saved && <span className="text-emerald-600 text-sm font-medium">✓ Settings saved</span>}
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+};

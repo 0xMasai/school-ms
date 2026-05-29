@@ -1,0 +1,118 @@
+import { useState, useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './contexts/AuthContext.jsx';
+import { isSetupComplete, getConfig } from './db/configService.js';
+import RoleGuard from './guards/RoleGuard.jsx';
+import AppLayout from './components/layout/AppLayout.jsx';
+import SetupWizard from './pages/setup/SetupWizard.jsx';
+import Login from './pages/auth/Login.jsx';
+import Dashboard from './pages/dashboard/Dashboard.jsx';
+import Students from './pages/students/Students.jsx';
+import Attendance from './pages/attendance/Attendance.jsx';
+import Exams from './pages/exams/Exams.jsx';
+import Fees from './pages/fees/Fees.jsx';
+import { Staff, Payroll, Expenses, Settings } from './pages/staff/Staff.jsx';
+import UserManagement from './pages/users/UserManagement.jsx';
+import Subjects from './pages/settings/Subjects.jsx';
+import { LoadingScreen } from './components/common/Badge.jsx';
+import './index.css';
+
+// ─── Inner app (needs auth context) ──────────────────────────────────────────
+const AppRoutes = ({ setupDone, schoolName, onSetupComplete }) => {
+  const { user, loading } = useAuth();
+
+  if (loading) return <LoadingScreen message="Starting up..." />;
+  if (!setupDone) return <SetupWizard onComplete={onSetupComplete} />;
+  if (!user) return <Login schoolName={schoolName} />;
+
+  return (
+    <Routes>
+      <Route path="/" element={<AppLayout schoolName={schoolName} />}>
+        <Route index element={<Dashboard />} />
+
+        {/* Academic — Admin + Teacher */}
+        <Route path="students"   element={<RoleGuard roles={['admin','teacher']}><Students /></RoleGuard>} />
+        <Route path="attendance" element={<RoleGuard roles={['admin','teacher']}><Attendance /></RoleGuard>} />
+        <Route path="exams"      element={<RoleGuard roles={['admin','teacher']}><Exams /></RoleGuard>} />
+
+        {/* Finance — Admin + Bursar */}
+        <Route path="fees"     element={<RoleGuard roles={['admin','bursar']}><Fees /></RoleGuard>} />
+        <Route path="payroll"  element={<RoleGuard roles={['admin','bursar']}><Payroll /></RoleGuard>} />
+        <Route path="expenses" element={<RoleGuard roles={['admin','bursar']}><Expenses /></RoleGuard>} />
+
+        {/* Admin only */}
+        <Route path="staff"    element={<RoleGuard roles={['admin']}><Staff /></RoleGuard>} />
+        <Route path="users"    element={<RoleGuard roles={['admin']}><UserManagement /></RoleGuard>} />
+        <Route path="settings"  element={<RoleGuard roles={['admin']}><Settings /></RoleGuard>} />
+        <Route path="subjects"  element={<RoleGuard roles={['admin']}><Subjects /></RoleGuard>} />
+
+        {/* Catch-all */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
+    </Routes>
+  );
+};
+
+// ─── Root App ─────────────────────────────────────────────────────────────────
+const App = () => {
+  const [setupDone, setSetupDone] = useState(false);
+  const [schoolName, setSchoolName] = useState('');
+  const [initializing, setInitializing] = useState(true);
+
+  useEffect(() => {
+    const init = async () => {
+      try {
+        // isSetupComplete reads config/app_config.
+        // Firestore rules allow this without authentication (allow read: if true).
+        const done = await isSetupComplete();
+        setSetupDone(done);
+        if (done) {
+          const cfg = await getConfig();
+          setSchoolName(cfg?.schoolName || '');
+        }
+      } catch (e) {
+        // Most likely cause: Firestore rules not yet published, or no network on
+        // first run before any data is cached locally.
+        // Log the full error so it's visible in DevTools / Electron console.
+        console.error('[App init] Firestore read failed:', e.code, e.message);
+        // Treat as "setup not done" so the wizard is shown and the user can
+        // proceed rather than being stuck on the loading screen.
+        setSetupDone(false);
+      } finally {
+        setInitializing(false);
+      }
+    };
+    init();
+  }, []);
+
+  const handleSetupComplete = async () => {
+    const cfg = await getConfig();
+    setSchoolName(cfg?.schoolName || '');
+    setSetupDone(true);
+  };
+
+  if (initializing) {
+    return (
+      <div className="min-h-screen bg-navy-950 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-navy-600 border-t-amber-400 rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-navy-400 text-sm">Loading School Management System…</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <AppRoutes
+          setupDone={setupDone}
+          schoolName={schoolName}
+          onSetupComplete={handleSetupComplete}
+        />
+      </AuthProvider>
+    </BrowserRouter>
+  );
+};
+
+export default App;
