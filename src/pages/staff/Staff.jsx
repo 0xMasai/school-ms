@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Plus, Search, Edit2, Trash2, Users, Banknote, Receipt,
   Settings as SettingsIcon, Save, AlertTriangle, Printer,
+  BarChart2, TrendingUp, PieChart,
 } from 'lucide-react';
 import { getStaff, createStaff, updateStaff, deleteStaff } from '../../db/staffService.js';
 import { getPayrollEntries, recordPayroll, getExpenses, recordExpense, deleteExpense } from '../../db/payrollService.js';
@@ -89,6 +90,242 @@ const TermYearBar = ({ selectedTerm, setSelectedTerm, selectedYear, setSelectedY
             Back to current
           </button>
         </span>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExpensesReport — category summary + monthly trend + print
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Colour palette cycled per category (tailwind-safe bg + text pairs)
+const CATEGORY_COLORS = [
+  { bg: 'bg-amber-100',   text: 'text-amber-700',   bar: 'bg-amber-400'   },
+  { bg: 'bg-blue-100',    text: 'text-blue-700',     bar: 'bg-blue-400'    },
+  { bg: 'bg-emerald-100', text: 'text-emerald-700',  bar: 'bg-emerald-400' },
+  { bg: 'bg-purple-100',  text: 'text-purple-700',   bar: 'bg-purple-400'  },
+  { bg: 'bg-rose-100',    text: 'text-rose-700',     bar: 'bg-rose-400'    },
+  { bg: 'bg-cyan-100',    text: 'text-cyan-700',     bar: 'bg-cyan-400'    },
+  { bg: 'bg-orange-100',  text: 'text-orange-700',   bar: 'bg-orange-400'  },
+  { bg: 'bg-teal-100',    text: 'text-teal-700',     bar: 'bg-teal-400'    },
+];
+
+const MONTH_NAMES = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+function buildCategoryData(expenses) {
+  const totals = {};
+  expenses.forEach((e) => {
+    totals[e.category] = (totals[e.category] || 0) + e.amount;
+  });
+  const grand = Object.values(totals).reduce((s, v) => s + v, 0) || 1;
+  return Object.entries(totals)
+    .sort((a, b) => b[1] - a[1])
+    .map(([category, total], i) => ({
+      category,
+      total,
+      pct: Math.round((total / grand) * 100),
+      color: CATEGORY_COLORS[i % CATEGORY_COLORS.length],
+    }));
+}
+
+function buildMonthlyData(expenses) {
+  const totals = {};
+  expenses.forEach((e) => {
+    if (!e.date) return;
+    const d = new Date(e.date);
+    if (isNaN(d)) return;
+    const key = d.getMonth(); // 0-11
+    totals[key] = (totals[key] || 0) + e.amount;
+  });
+  // Only return months that have data
+  return Object.entries(totals)
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([monthIdx, total]) => ({ label: MONTH_NAMES[Number(monthIdx)], total }));
+}
+
+const ExpensesReport = ({ expenses, config, term, year }) => {
+  const categories = buildCategoryData(expenses);
+  const monthly    = buildMonthlyData(expenses);
+  const grand      = expenses.reduce((s, e) => s + e.amount, 0);
+  const maxMonthly = Math.max(...monthly.map((m) => m.total), 1);
+
+  const handlePrint = () => {
+    const rows = categories
+      .map((c) => `
+        <tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9">${c.category}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;text-align:right">${c.pct}%</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;text-align:right;font-weight:600">UGX ${c.total.toLocaleString()}</td>
+        </tr>`)
+      .join('');
+
+    const monthRows = monthly
+      .map((m) => `
+        <tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9">${m.label}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;text-align:right;font-weight:600">UGX ${m.total.toLocaleString()}</td>
+        </tr>`)
+      .join('');
+
+    const html = `
+      <!DOCTYPE html><html><head><title>Expense Report</title>
+      <style>
+        body { font-family: Arial, sans-serif; color: #1e293b; padding: 32px; max-width: 720px; margin: 0 auto; }
+        h1 { font-size: 22px; margin-bottom: 4px; }
+        .meta { color: #64748b; font-size: 13px; margin-bottom: 28px; }
+        h2 { font-size: 15px; font-weight: 700; border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin: 24px 0 12px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; padding: 8px 12px; background: #f8fafc; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #64748b; }
+        .total-row td { font-weight: 700; background: #f8fafc; padding: 10px 12px; }
+        @media print { body { padding: 0; } }
+      </style></head><body>
+      <h1>${config?.schoolName || 'School'} — Expense Report</h1>
+      <div class="meta">${term} &middot; ${year} &middot; Generated ${new Date().toLocaleDateString()}</div>
+
+      <h2>Summary by Category</h2>
+      <table>
+        <thead><tr><th>Category</th><th style="text-align:right">Share</th><th style="text-align:right">Total</th></tr></thead>
+        <tbody>${rows}
+          <tr class="total-row">
+            <td>Grand Total</td><td style="text-align:right">100%</td>
+            <td style="text-align:right">UGX ${grand.toLocaleString()}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Monthly Breakdown</h2>
+      <table>
+        <thead><tr><th>Month</th><th style="text-align:right">Total</th></tr></thead>
+        <tbody>${monthRows}</tbody>
+      </table>
+      </body></html>`;
+
+    // Use a hidden iframe instead of window.open — avoids popup blockers
+    // and the Microsoft Store redirect that window.open triggers on some Windows setups.
+    const existing = document.getElementById('__expense_print_frame');
+    if (existing) existing.remove();
+
+    const iframe = document.createElement('iframe');
+    iframe.id = '__expense_print_frame';
+    iframe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;border:none;visibility:hidden;';
+    document.body.appendChild(iframe);
+
+    const doc = iframe.contentDocument || iframe.contentWindow.document;
+    doc.open();
+    doc.write(html);
+    doc.close();
+
+    // Wait for content to render before printing
+    iframe.onload = () => {
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();
+      // Clean up after the print dialog closes
+      setTimeout(() => { if (iframe.parentNode) iframe.parentNode.removeChild(iframe); }, 1000);
+    };
+  };
+
+  if (expenses.length === 0) {
+    return (
+      <div className="py-16 text-center text-slate-400">
+        <PieChart size={36} className="mx-auto mb-3 opacity-40" />
+        <p className="text-sm">No expense data to report for {term}, {year}.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* ── Header row ── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs text-slate-500 uppercase tracking-wide font-semibold mb-0.5">
+            Expense Report
+          </p>
+          <p className="text-sm text-slate-600">{term} · {year} · {expenses.length} records · {formatCurrency(grand)} total</p>
+        </div>
+        <Button size="sm" variant="secondary" icon={Printer} onClick={handlePrint}>
+          Print Report
+        </Button>
+      </div>
+
+      {/* ── Category summary ── */}
+      <div>
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700 mb-3">
+          <PieChart size={14} className="text-slate-400" />
+          Summary by Category
+        </h3>
+        <div className="space-y-2.5">
+          {categories.map((c) => (
+            <div key={c.category}>
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${c.color.bg} ${c.color.text}`}>
+                    {c.category}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 text-sm">
+                  <span className="text-slate-400 text-xs">{c.pct}%</span>
+                  <span className="font-semibold text-slate-800 tabular-nums">{formatCurrency(c.total)}</span>
+                </div>
+              </div>
+              <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${c.color.bar} transition-all duration-500`}
+                  style={{ width: `${c.pct}%` }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Total row */}
+        <div className="flex justify-between items-center mt-4 pt-3 border-t border-slate-100">
+          <span className="text-sm font-semibold text-slate-700">Grand Total</span>
+          <span className="text-base font-bold text-slate-900">{formatCurrency(grand)}</span>
+        </div>
+      </div>
+
+      {/* ── Monthly trend ── */}
+      {monthly.length > 0 && (
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700 mb-3">
+            <BarChart2 size={14} className="text-slate-400" />
+            Monthly Trend
+          </h3>
+          <div className="flex items-end gap-2 h-28">
+            {monthly.map((m) => {
+              const heightPct = Math.round((m.total / maxMonthly) * 100);
+              const isPeak    = m.total === maxMonthly;
+              return (
+                <div key={m.label} className="flex-1 flex flex-col items-center gap-1 min-w-0 group">
+                  <span className="text-xs text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity tabular-nums leading-none">
+                    {formatCurrency(m.total)}
+                  </span>
+                  <div className="w-full flex items-end" style={{ height: '72px' }}>
+                    <div
+                      className={`w-full rounded-t-md transition-all duration-500 ${
+                        isPeak ? 'bg-amber-400' : 'bg-amber-200 group-hover:bg-amber-300'
+                      }`}
+                      style={{ height: `${Math.max(heightPct, 4)}%` }}
+                      title={`${m.label}: ${formatCurrency(m.total)}`}
+                    />
+                  </div>
+                  <span className={`text-xs font-medium ${isPeak ? 'text-amber-600' : 'text-slate-400'}`}>
+                    {m.label}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-xs text-slate-400 mt-2">
+            Peak month: <span className="font-medium text-slate-600">
+              {monthly.find((m) => m.total === maxMonthly)?.label}
+            </span> · Hover bars for amounts
+          </p>
+        </div>
       )}
     </div>
   );
@@ -464,6 +701,9 @@ export const Expenses = () => {
   const [formError, setFormError] = useState('');
   const [saving, setSaving]       = useState(false);
 
+  // ── Transactions / Reports toggle ──
+  const [view, setView] = useState('transactions');
+
   const [selectedTerm, setSelectedTerm] = useState('');
   const [selectedYear, setSelectedYear] = useState('');
   const [yearOptions, setYearOptions]   = useState([]);
@@ -545,37 +785,73 @@ export const Expenses = () => {
       </div>
 
       <Card>
-        {loading ? <LoadingScreen /> : expenses.length === 0 ? (
-          <EmptyState icon={Receipt} title="No expenses recorded"
-            message={`No expenses recorded for ${selectedTerm}, ${selectedYear}.`}
-            action={<Button icon={Plus} onClick={() => setModalOpen(true)}>Add Expense</Button>} />
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-100">
-                  {['Category', 'Description', 'Amount', 'Date', ''].map((h) => (
-                    <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {expenses.map((e) => (
-                  <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50/60 group">
-                    <td className="py-3 px-3"><Badge variant="warning">{e.category}</Badge></td>
-                    <td className="py-3 px-3 text-sm text-slate-800">{e.description}</td>
-                    <td className="py-3 px-3 text-sm font-semibold text-amber-700">{formatCurrency(e.amount)}</td>
-                    <td className="py-3 px-3 text-sm text-slate-500">{formatDate(e.date)}</td>
-                    <td className="py-3 px-3">
-                      <Button size="xs" variant="ghost" icon={Trash2}
-                        className="opacity-0 group-hover:opacity-100 text-red-500 hover:bg-red-50"
-                        onClick={() => setDeleting(e)} />
-                    </td>
+        {/* ── View toggle: Transactions / Reports ── */}
+        <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl mb-5 self-start w-fit">
+          {[
+            { key: 'transactions', label: 'Transactions', icon: Receipt },
+            { key: 'reports',      label: 'Reports',      icon: BarChart2 },
+          ].map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => setView(key)}
+              className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                view === key
+                  ? 'bg-white text-navy-800 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <Icon size={13} />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Transactions view ── */}
+        {view === 'transactions' && (
+          loading ? <LoadingScreen /> : expenses.length === 0 ? (
+            <EmptyState icon={Receipt} title="No expenses recorded"
+              message={`No expenses recorded for ${selectedTerm}, ${selectedYear}.`}
+              action={<Button icon={Plus} onClick={() => setModalOpen(true)}>Add Expense</Button>} />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-slate-100">
+                    {['Category', 'Description', 'Amount', 'Date', ''].map((h) => (
+                      <th key={h} className="text-left py-2 px-3 text-xs font-semibold text-slate-500 uppercase tracking-wide">{h}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {expenses.map((e) => (
+                    <tr key={e.id} className="border-b border-slate-50 hover:bg-slate-50/60 group">
+                      <td className="py-3 px-3"><Badge variant="warning">{e.category}</Badge></td>
+                      <td className="py-3 px-3 text-sm text-slate-800">{e.description}</td>
+                      <td className="py-3 px-3 text-sm font-semibold text-amber-700">{formatCurrency(e.amount)}</td>
+                      <td className="py-3 px-3 text-sm text-slate-500">{formatDate(e.date)}</td>
+                      <td className="py-3 px-3">
+                        <Button size="xs" variant="ghost" icon={Trash2}
+                          className="opacity-0 group-hover:opacity-100 text-red-500 hover:bg-red-50"
+                          onClick={() => setDeleting(e)} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+
+        {/* ── Reports view ── */}
+        {view === 'reports' && (
+          loading ? <LoadingScreen /> : (
+            <ExpensesReport
+              expenses={expenses}
+              config={config}
+              term={selectedTerm}
+              year={selectedYear}
+            />
+          )
         )}
       </Card>
 
